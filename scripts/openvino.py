@@ -420,7 +420,7 @@ class OVUnet(sd_unet.SdUnet):
         self.loaded_config = None
         self.lora_fused = defaultdict(bool)
         self.unet = None
-        self.controlnet = None
+        self.control_models = []
         self.control_images = []
         self.vae = None
         self.current_uc_indices = None
@@ -520,22 +520,34 @@ class OVUnet(sd_unet.SdUnet):
         if self.has_controlnet:
             print('controlnet detected')
             cond_mark, self.current_uc_indices, self.current_c_indices, context = unmark_prompt_context(context)
-            control_model = OV_df_pipe.controlnet
-            image = OV_df_pipe.control_images[0]
-            print('image min and max:', torch.min(image), torch.max(image))
-            print('x min and max:', torch.min(x), torch.max(x)) #  tensor(-13.3997) tensor(11.1092)
-            print('context min and max:', torch.min(context), torch.max(context),'shape:', context.shape ) #  tensor(-1024.) tensor(1024.)  [2, 78, 768])
-            control_model = torch.compile(OV_df_pipe.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
-            down_block_res_samples, mid_block_res_sample = control_model(
-                x,
-                timesteps,
-                encoder_hidden_states=context,
-                controlnet_cond=OV_df_pipe.control_images[0],
-                conditioning_scale=1.0,
-                guess_mode = False,
-                return_dict=False,
-                #y=y
-            )
+
+            for i in range(len(OV_df_pipe.control_models)):
+                print('control model:', OV_df_pipe.control_models[i])
+                control_model = OV_df_pipe.control_models[i]
+                image = OV_df_pipe.control_images[i]
+                print('image min and max:', torch.min(image), torch.max(image))
+                print('x min and max:', torch.min(x), torch.max(x)) #  tensor(-13.3997) tensor(11.1092)
+                print('context min and max:', torch.min(context), torch.max(context),'shape:', context.shape ) #  tensor(-1024.) tensor(1024.)  [2, 78, 768])
+                control_model = torch.compile(OV_df_pipe.controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
+                down_samples, mid_sample = control_model(
+                    x,
+                    timesteps,
+                    encoder_hidden_states=context,
+                    controlnet_cond=image,
+                    conditioning_scale=1.0,
+                    guess_mode = False,
+                    return_dict=False,
+                    #y=y
+                )
+                # merge samples
+                if i == 0:
+                    down_block_res_samples, mid_block_res_sample = down_samples, mid_sample
+                else:
+                    down_block_res_samples = [
+                        samples_prev + samples_curr
+                        for samples_prev, samples_curr in zip(down_block_res_samples, down_samples)
+                    ]
+                    mid_block_res_sample += mid_sample
             ''''
             [diffusers ref]
             image min and max:  tensor(0.) tensor(1.)
@@ -705,7 +717,7 @@ class OVUnet(sd_unet.SdUnet):
         print('[OV] cnet detected')
         OV_df_pipe.has_controlnet = True
         
-        model_state.control_models = control_models
+        OV_df_pipe.control_models = control_models
         OV_df_pipe.control_images = control_images
         
         print("model_state.control_models:", model_state.control_models)
