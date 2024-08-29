@@ -43,8 +43,9 @@ from diffusers import (
 
 current_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 print('current_extension_directory', current_extension_directory)
-#sys.path.append(current_extension_directory)
+sys.path.append(current_extension_directory)
 #from internal_controlnet import external_code  # noqa: F403
+#from internal_controlnet.external_code import ControlNetUnit, Preprocessor
 
 #ignore future warnings
 import warnings
@@ -57,17 +58,16 @@ class ModelState:
     def __init__(self):
         self.enable_ov_extension = False
         self.enable_caching = False
-        self.recompile = 1
+        self.recompile = True
         self.device = "CPU"
         self.height = 512
         self.width = 512
         self.batch_size = 1
         self.mode = 0
         self.partition_id = 0
-        self.model_hash = ""
+        self.model_name = ""
         self.control_models = []
         self.is_sdxl = False
-        self.cn_model = "None"
         self.lora_model = "None"
         self.vae_ckpt = "None"
         self.refiner_ckpt = "None"
@@ -412,21 +412,15 @@ def get_control(
 
 
 class OVUnet(sd_unet.SdUnet):
-    def __init__(self, model_name: str, *args, **kwargs):
+    def __init__(self, p: processing.StableDiffusionProcessing):
         super().__init__()
-        self.process = None
-
-        self.model_name = model_name
+        self.model_name = p.sd_model_name
+        self.process = p
         #self.configs = configs
-
         self.loaded_config = None
-        
         self.lora_fused = defaultdict(bool)
-
-
         self.unet = None
         self.controlnet = None
-        self.control_images = None
         self.control_images = []
         self.vae = None
         self.current_uc_indices = None
@@ -585,9 +579,8 @@ class OVUnet(sd_unet.SdUnet):
         self.loaded_config = self.configs[self.profile_idx]
         self.engine.reset(os.path.join(OV_MODEL_DIR, self.loaded_config["filepath"]))
         self.activate(p)
-        
+    @staticmethod 
     def prepare_image(
-        self,
         image,
         width,
         height,
@@ -599,12 +592,12 @@ class OVUnet(sd_unet.SdUnet):
         guess_mode=False,
     ):  
         from diffusers.image_processor import VaeImageProcessor
-        self.vae_scale_factor = 2 ** (len(OV_df_pipe.vae.config.block_out_channels) - 1)
-        self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True)
-        self.control_image_processor = VaeImageProcessor(
-            vae_scale_factor=self.vae_scale_factor, do_convert_rgb=True, do_normalize=False
+        vae_scale_factor = 2 ** (len(OV_df_pipe.vae.config.block_out_channels) - 1)
+        image_processor = VaeImageProcessor(vae_scale_factor=vae_scale_factor, do_convert_rgb=True)
+        control_image_processor = VaeImageProcessor(
+            vae_scale_factor=vae_scale_factor, do_convert_rgb=True, do_normalize=False
         )
-        image = self.control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
+        image = control_image_processor.preprocess(image, height=height, width=width).to(dtype=torch.float32)
         image_batch_size = image.shape[0]
 
         if image_batch_size == 1:
@@ -622,13 +615,18 @@ class OVUnet(sd_unet.SdUnet):
 
         return image
 
-    def activate(self, p, checkpoint = None):
+    # re-load weights and and compile or recompile the model
+    @staticmethod
+    def activate(p, checkpoint = None):
 
         print('[OV]unload the already loaded unet')
         from modules.sd_models import model_data, send_model_to_trash
         
         
         global df_pipe, OV_df_pipe
+
+        
+        
         if model_data.sd_model:
             #send_model_to_trash(model_data.sd_model)
             #model_data.sd_model = None
@@ -636,18 +634,17 @@ class OVUnet(sd_unet.SdUnet):
             devices.torch_gc()
             print('[OV] finished unloading model')
         
-        '''
+        
         if OV_df_pipe is not None:
+            print('del old OV_df_pipe')
             del OV_df_pipe
             del df_pipe
             gc.collect()
-            OV_df_pipe = None
-            df_pipe = None
             print('del old OV_df_pipe and df_pipe')
-        '''
+
+        OV_df_pipe = OVUnet(p)
+        df_pipe = None
         
-        
-        #self.loaded_config = self.configs[self.profile_idx]
         # model state
         #### controlnet ####
         print(p.extra_generation_params)
@@ -672,12 +669,10 @@ class OVUnet(sd_unet.SdUnet):
         OV_df_pipe.vae = df_pipe.vae.to("cpu")
         print('OpenVINO Extension: loaded unet model')
             
-        self.has_controlnet = False
+        OV_df_pipe.has_controlnet = False
         cn_model="None"
         control_models = []
         control_images = []
-        print("p.extra_generation_params", p.extra_generation_params)
-        sys.path.append(current_extension_directory)
         from internal_controlnet.external_code import ControlNetUnit, Preprocessor
         for param in p.script_args: 
             if isinstance(param, ControlNetUnit): 
@@ -708,7 +703,7 @@ class OVUnet(sd_unet.SdUnet):
             return
 
         print('[OV] cnet detected')
-        self.has_controlnet = True
+        OV_df_pipe.has_controlnet = True
         
         model_state.control_models = control_models
         OV_df_pipe.control_images = control_images
@@ -746,13 +741,15 @@ class OVUnet(sd_unet.SdUnet):
         # process image
         print('begin self.prepare_image')
         for i in range(len(OV_df_pipe.control_images)):
-            OV_df_pipe.control_images[i] = self.prepare_image(OV_df_pipe.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
+            OV_df_pipe.control_images[i] = OVUnet.prepare_image(OV_df_pipe.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
         print('end self.prepare_image')
+        sd_unet.current_unet = OV_df_pipe
         print('end of activate')
         
 
     def deactivate(self):
-        del self.unet
+        print('[OV]deactivate called')
+        #del self.unet
 
 
         
@@ -1303,6 +1300,10 @@ class Script(scripts.Script):
         df_pipe.fuse_lora(adapter_names=names, lora_scale=1.0)
         
         df_pipe.unload_lora_weights()
+    
+    def build_unet(self, p):
+        OVUnet.activate(p) # reload the engine
+        
         
         
         
@@ -1310,6 +1311,7 @@ class Script(scripts.Script):
     def process(self, p, *args):
         print("[OV]ov process called")
         model_state.refiner_ckpt = p.refiner_checkpoint
+        model_state.model_name = p.sd_model_name
         
         from modules import scripts
         current_extension_directory = scripts.basedir() + '/extensions/sd-webui-controlnet/scripts'
@@ -1325,6 +1327,7 @@ class Script(scripts.Script):
 
         if not enable_ov:
             print('ov disabled, do nothing')
+            self.restore_unet(p)
             return
         
         global opt
@@ -1349,19 +1352,29 @@ class Script(scripts.Script):
             model_state.recompile = True
         else:
             model_state.recompile = False
+        
+        current_control_models = []
+        from internal_controlnet import external_code  # noqa: F403
+        from internal_controlnet.external_code import ControlNetUnit, Preprocessor
+        for param in p.script_args: 
+            if isinstance(param, ControlNetUnit): 
+                if param.enabled == False: continue
+                current_control_models.append(param.model.split(' ')[0])
+        if current_control_models != model_state.control_models:
+            model_state.recompile = True
+            print('set recompile to true due to control models change')
+            model_state.control_models = current_control_models
+        
+        
+        
         opt = opt_new
 
-        global OV_df_pipe, df_pipe
-        if OV_df_pipe == None:
-            print('OV_df_pipe is None, create new')
-            OV_df_pipe = OVUnet(p.sd_model_name)
-            OV_df_pipe.process = p
-            self.apply_unet(p)
-        elif model_state.recompile:
-            print('reuse model weights but recompile due to opts change')
-            self.apply_unet(p)
-        else:
-            print('reuse OV_df_pipe, no recompile')
+        if model_state.recompile:
+            print('[OV]recompile')
+            self.build_unet(p) # rebuild unet from safe tensors
+        
+        self.apply_unet(p) # hook the forward function of unet, do this for every process call
+        
 
         # to do: add feature to fallback default vae after replacement
         if loaded_vae_file is not None:
@@ -1387,26 +1400,44 @@ class Script(scripts.Script):
         if sd_unet.current_unet is not None:
             sd_unet.current_unet.deactivate()
         
-        print("begin activate unet")
-        sd_unet.current_unet = OV_df_pipe
+        
+        
         sd_ldm = p.sd_model
-        unet = sd_ldm.model.diffusion_model
+        model = sd_ldm.model.diffusion_model
+
+        model._original_forward = model.forward
+        
+        
+        
+        
+        
         print('force forward ')
-        unet.forward = OV_df_pipe.forward
+        model.forward = OV_df_pipe.forward
         print('finish force forward ')
-        sd_unet.current_unet.activate(p)
+    
+    def restore_unet(self,p):
+        if sd_unet.current_unet is not None:
+            sd_unet.current_unet.deactivate()
+        sd_unet.current_unet = None
+
+        sd_ldm = p.sd_model
+        model = sd_ldm.model.diffusion_model
+        if hasattr(model, "_original_forward"):
+            model.forward = model._original_forward 
+            del model._original_forward
+        
+        
+        print('restore unet')
 
 
 def refiner_cb_fn(args):
     
-    print('openvino_cb_fn called')
-    print('openvino_cb_fn: enable refiner')
-    print('OV_df_pipe.process.extra_generation_params[Refiner]', OV_df_pipe.process.extra_generation_params.get('Refiner', None) if OV_df_pipe else None)
-    print('OV_df_pipe.process.extra_generation_params[Refiner switch at]', OV_df_pipe.process.extra_generation_params.get('Refiner switch at',None) if OV_df_pipe else None)
-
     if model_state.enable_ov_extension and OV_df_pipe and OV_df_pipe.process.extra_generation_params.get('Refiner', False):
         refiner_filename = model_state.refiner_ckpt.split(' ')[0]
         print('[OV] reload refiner checkpoint:',refiner_filename)
-        OV_df_pipe.activate(OV_df_pipe.process, refiner_filename)
+        OVUnet.activate(OV_df_pipe.process, refiner_filename)
+    elif model_state.enable_ov_extension and OV_df_pipe:
+        print("[OV]re-apply main model weights")
+        OVUnet.activate(OV_df_pipe.process)
         
-script_callbacks.on_model_loaded(refiner_cb_fn, name=None)
+script_callbacks.on_model_loaded(refiner_cb_fn)
