@@ -44,6 +44,7 @@ from diffusers import (
 current_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 print('current_extension_directory', current_extension_directory)
 sys.path.append(current_extension_directory)
+from scripts.utils import load_state_dict, get_state_dict
 #from internal_controlnet import external_code  # noqa: F403
 #from internal_controlnet.external_code import ControlNetUnit, Preprocessor
 
@@ -237,6 +238,7 @@ class ControlModelType(Enum):
     Controlllite = "Controlllite, Kohya"
     InstantID = "InstantID, Qixun Wang"
     SparseCtrl = "SparseCtrl, Yuwei Guo"
+    Unknown = "Unknown"
 
     @property
     def is_controlnet(self) -> bool:
@@ -689,9 +691,45 @@ class OVUnet(sd_unet.SdUnet):
         for param in p.script_args: 
             if isinstance(param, ControlNetUnit): 
                 if param.enabled == False: continue
-                print('[OV]disable enabled units')
+                
+                model_name = param.model.split(' ')[0] 
+                control_models.append(model_name)
+
+                cn_model_dir_path = os.path.join(scripts.basedir(),'extensions','sd-webui-controlnet','models')
+                cn_model_path = os.path.join(cn_model_dir_path, model_name)
+                if os.path.isfile(cn_model_path + '.pt'):
+                    cn_model_path = cn_model_path + '.pt'
+                elif os.path.isfile(cn_model_path + '.safetensors'):
+                    cn_model_path = cn_model_path + '.safetensors'
+                elif os.path.isfile(cn_model_path + '.pth'):
+                    cn_model_path = cn_model_path + '.pth'
+                    
+                # parse controlnet type
+                control_model_type = ControlModelType.Unknown
+                print('load state_dict')
+                state_dict = load_state_dict(cn_model_path)
+                if "lora_controlnet" in state_dict:
+                    control_model_type =  ControlModelType.ControlLoRA
+                elif "down_blocks.0.motion_modules.0.temporal_transformer.norm.weight" in state_dict:
+                    control_model_type = ControlModelType.SparseCtrl
+                elif "control_add_embedding.linear_1.bias" in state_dict: # Controlnet Union
+
+                    control_model_type = ControlModelType.ControlNetUnion
+                elif "instant_id" in cn_model_path.lower():
+                    control_model_type = ControlModelType.InstantID
+                else:
+                    control_model_type = ControlModelType.ControlNet
+                
+                if control_model_type == ControlModelType.ControlNet:
+                    
+                    controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=False)
+                    OV_df_pipe.controlnet = controlnet
+                else:
+                    assert False, f"Control model type {control_model_type} is not supported."
+                
+                
+                print('[OV]this is supported by OV, disable enabled units to avoid controlnet extension hook')
                 param.enabled = False # disable param.enabled, controlnet extension cannot find enabled units
-                control_models.append(param.model.split(' ')[0])
                 # preprocess the image before, adapted from controlnet extension
                 unit = param
                 preprocessor = Preprocessor.get_preprocessor(unit.module)
@@ -746,9 +784,6 @@ class OVUnet(sd_unet.SdUnet):
                 cn_model_path = cn_model_path + '.safetensors'
             elif os.path.isfile(cn_model_path + '.pth'):
                 cn_model_path = cn_model_path + '.pth'
-
-            controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=False)
-            OV_df_pipe.controlnet = controlnet
         
         # process image
         print('begin self.prepare_image')
@@ -1383,7 +1418,11 @@ class Script(scripts.Script):
 
         if model_state.recompile:
             print('[OV]recompile')
-            self.build_unet(p) # rebuild unet from safe tensors
+            try:
+                self.build_unet(p) # rebuild unet from safe tensors
+            except Exception as e:
+                print(f'[OV]Error build_unet: {e}')
+                return
         
         self.apply_unet(p) # hook the forward function of unet, do this for every process call
         
