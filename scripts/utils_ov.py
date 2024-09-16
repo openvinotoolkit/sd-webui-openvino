@@ -108,7 +108,7 @@ def set_numpy_seed(p: processing.StableDiffusionProcessing) -> Optional[int]:
     with 0xFFFFFFFF to ensure it fits within a 32-bit integer.
     """
     try:
-        # to do: fix multiple seeds in x y z plot or prompt matrix
+        #TODO: fix multiple seeds in x y z plot or prompt matrix
         tmp_seed = int(p.all_seeds[0]) # if len(p.seed) == 1 and p.seed == -1 else max((p.seed), 0))
         tmp_subseed = int(p.all_seeds[0]) # if len(p.subseed) == 1 and p.subseed == -1 else max((p.subseed), 0))
         seed = (tmp_seed + tmp_subseed) & 0xFFFFFFFF

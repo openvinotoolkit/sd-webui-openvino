@@ -3,6 +3,7 @@
 from contextlib import closing
 import cv2
 import os
+import logging
 import torch
 import time
 import functools
@@ -30,6 +31,8 @@ from modules.sd_models import CheckpointInfo, get_checkpoint_state_dict
 from modules.shared import opts, state
 from modules.ui_common import create_refresh_button
 from modules.timer import Timer
+from modules.processing import StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img, StableDiffusionProcessing
+
 
 import openvino
 from openvino.runtime import Core, Type, PartialShape, serialize
@@ -48,11 +51,13 @@ from scripts.utils_ov import ResizeMode, ControlModelType
 controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 sys.path.append(controlnet_extension_directory)
 from scripts.utils import load_state_dict, get_state_dict
+from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS, get_control
 
 #ignore future warnings
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
-
+logging = logging.getLogger("OpenVINO")
+logging.setLevel("INFO")
 
 def cond_stage_key(self):
     return None
@@ -66,7 +71,6 @@ class NoWatermark:
 def on_change(mode):
     return gr.update(visible=mode)
 
-from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS, get_control
 
 class OVUnetOption(sd_unet.SdUnetOption):
     def __init__(self, name: str):
@@ -78,7 +82,6 @@ class OVUnetOption(sd_unet.SdUnetOption):
         return OVUnet(self.model_name)
 
 
-from modules.processing import StableDiffusionProcessingImg2Img, StableDiffusionProcessingTxt2Img, StableDiffusionProcessing
 
 class OVUnet(sd_unet.SdUnet):
     def __init__(self, p: processing.StableDiffusionProcessing):
@@ -97,9 +100,9 @@ class OVUnet(sd_unet.SdUnet):
         self.has_controlnet = False
     
     def forward(self, x, timesteps=None, context=None, y=None, **kwargs):
-        print('[OV] forward called')
+        logging.info('  forward called')
         if y is not None:
-            print('[OV] sd-xl detected')
+            logging.info('  sd-xl detected')
             prompt = self.process.prompt
             negative_prompt = self.process.negative_prompt
             device = df_pipe._execution_device
@@ -179,21 +182,18 @@ class OVUnet(sd_unet.SdUnet):
             added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
             
         else:
-            print('[OV] sd 1.5 detected')
+            logging.info('  standard(not xl) model detected')
             added_cond_kwargs = {}
         
         down_block_res_samples, mid_block_res_sample = None, None 
         if self.has_controlnet:
-            print('[OV] controlnet detected')
+            logging.info('  controlnet detected')
             cond_mark, self.current_uc_indices, self.current_c_indices, context = unmark_prompt_context(context)
 
             for i in range(len(pipes['openvino'].control_models)):
-                print('control model:', pipes['openvino'].control_models[i])
+                logging.info('  control model:', pipes['openvino'].control_models[i])
                 control_model = pipes['openvino'].control_models[i]
                 image = pipes['openvino'].control_images[i]
-                print('image min and max:', torch.min(image), torch.max(image))
-                print('x min and max:', torch.min(x), torch.max(x)) #  tensor(-13.3997) tensor(11.1092)
-                print('context min and max:', torch.min(context), torch.max(context),'shape:', context.shape ) #  tensor(-1024.) tensor(1024.)  [2, 78, 768])
                 control_model = torch.compile(pipes['openvino'].controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
                 down_samples, mid_sample = control_model(
                     x,
@@ -203,7 +203,6 @@ class OVUnet(sd_unet.SdUnet):
                     conditioning_scale=1.0,
                     guess_mode = False,
                     return_dict=False,
-                    #y=y
                 )
                 # merge samples
                 if i == 0:
@@ -215,9 +214,9 @@ class OVUnet(sd_unet.SdUnet):
                     ]
                     mid_block_res_sample += mid_sample
             
-            print('[OV] controlnet output shapes:',[d.shape for d in down_block_res_samples], mid_block_res_sample.shape)
+            logging.info('  controlnet output shapes:',[d.shape for d in down_block_res_samples], mid_block_res_sample.shape)
         else:
-            print('[OV] no controlnet detected')
+            logging.info('  no controlnet detected')
         
         noise_pred = pipes['openvino'].unet(
                 x,
@@ -233,7 +232,7 @@ class OVUnet(sd_unet.SdUnet):
     
     def apply_loras(self, refit_dict: dict):
         if not self.refitted_keys.issubset(set(refit_dict.keys())):
-            # Need to ensure that weights that have been modified before and are not present anymore are reset.
+            # TODO: Need to ensure that weights that have been modified before and are not present anymore are reset.
             self.refitted_keys = set()
             self.switch_engine()
 
@@ -285,7 +284,7 @@ class OVUnet(sd_unet.SdUnet):
     @staticmethod
     def activate(p, checkpoint = None):
 
-        print('[OV]unload the already loaded unet')
+        logging.info(' unload the already loaded unet')
         from modules.sd_models import model_data, send_model_to_trash
         
         if model_data.sd_model:
@@ -293,45 +292,51 @@ class OVUnet(sd_unet.SdUnet):
             #model_data.sd_model = None
             model_data.sd_model.state_dict().clear()
             devices.torch_gc()
-            print('[OV] finished unloading model')
+            logging.info('  finished unloading model')
        
         if pipes['openvino'] is not None:
-            print('del old pipes[openvino]')
-            #del OV_df_pipe
+            logging.info('del old pipes[openvino]')
             del pipes['openvino']
             del pipes['diffusers']
             
             gc.collect()
             pipes['openvino'] = None
             pipes['diffusers'] = None
-            print('del old OV_df_pipe and df_pipe')
+            logging.info('del old OV_df_pipe and df_pipe')
 
         ov_model = OVUnet(p)
         pipes['diffusers'] = None
         
         #### controlnet ####
-        print(p.extra_generation_params)
+        logging.info(p.extra_generation_params)
 
         
-        print('[OV] loading OV unet model')
+        logging.info('  loading OV unet model')
         checkpoint_name = checkpoint or shared.opts.sd_model_checkpoint.split(" ")[0]
         checkpoint_path = os.path.join(scripts.basedir(), 'models', 'Stable-diffusion', checkpoint_name)
         checkpoint_info = CheckpointInfo(checkpoint_path)
         timer = Timer()
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
-        print("[OV] created model from config : " + checkpoint_config)
+        logging.info("  created model from config : " + checkpoint_config)
         if 'xl' not in checkpoint_config:
-            print('[OV] load sd1 or sd2 pipeline')
+            logging.info('  load sd pipeline')
             pipes['diffusers'] = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         else:
-            print('[OV] load sd-xl pipeline')
+            logging.info('  load sd-xl pipeline')
             pipes['diffusers'] = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         ov_model.unet = pipes['diffusers'].unet.to("cpu") # OV device should only be in the options for torch.compile
         ov_model.unet = torch.compile(ov_model.unet, backend="openvino", options = opt)
         ov_model.vae = pipes['diffusers'].vae.to("cpu")
-        print('[OV]: loaded unet model')
-            
+
+        if loaded_vae_file is not None:
+            logging.info('  hook the vae')
+            ov_model.vae = AutoencoderKL.from_single_file(loaded_vae_file, local_files_only=True)
+        else:
+            ov_model.vae = pipes['diffusers'].vae.to("cpu")
+        ov_model.vae.decode = torch.compile(ov_model.vae.decode, backend="openvino", options = opt)
+        
+        
         ov_model.has_controlnet = False
         cn_model="None"
         control_models = []
@@ -355,7 +360,7 @@ class OVUnet(sd_unet.SdUnet):
                     
                 # parse controlnet type
                 control_model_type = ControlModelType.Unknown
-                print('load state_dict')
+                logging.info('load state_dict')
                 state_dict = load_state_dict(cn_model_path)
                 if "lora_controlnet" in state_dict:
                     control_model_type =  ControlModelType.ControlLoRA
@@ -377,40 +382,40 @@ class OVUnet(sd_unet.SdUnet):
                     assert False, f"Control model type {control_model_type} is not supported."
                 
                 
-                print('[OV]this is supported by OV, disable enabled units to avoid controlnet extension hook')
+                logging.info(' this is supported by OV, disable enabled units to avoid controlnet extension hook')
                 param.enabled = False # disable param.enabled, controlnet extension cannot find enabled units
                 # preprocess the image before, adapted from controlnet extension
                 unit = param
                 preprocessor = Preprocessor.get_preprocessor(unit.module)
-                print('[OV] preprocessor:', preprocessor)
+                logging.info('  preprocessor:', preprocessor)
                 
                 
                 if unit.ipadapter_input is not None:
-                    print('[OV] ipadapter_input is not None:', unit.ipadapter_input)
+                    logging.info('  ipadapter_input is not None:', unit.ipadapter_input)
                     # Use ipadapter_input from API call.
                     #assert control_model_type == ControlModelType.IPAdapter
                     controls = unit.ipadapter_input
                     hr_controls = unit.ipadapter_input
                 else:
-                    print('[OV] unit.ipdadapter_input is None, call default get_control')
+                    logging.info('  unit.ipdadapter_input is None, call default get_control')
                     controls, hr_controls, additional_maps = get_control(  # get the controlnet input? Yes, preprocess
                         p, unit, 0, ControlModelType.ControlNet, preprocessor)
                     control_images.append(controls[0])
 
         
         if not control_images: 
-            print('[OV] NO CNET detected, unet build finished')
+            logging.info('  NO CNET detected, unet build finished')
             pipes['openvino'] = ov_model
             return
 
-        print('[OV] cnet detected')
+        logging.info('  cnet detected')
         ov_model.has_controlnet = True
         ov_model.control_models = control_models
         ov_model.control_images = control_images
         
-        print("[OV] model_state.control_models:", model_state.control_models)
+        logging.info("  model_state.control_models:", model_state.control_models)
         
-        print('[OV] begin loading controlnet model(s)')
+        logging.info('  begin loading controlnet model(s)')
         
         if (len(model_state.control_models) > 1):
             controlnet = []
@@ -440,11 +445,17 @@ class OVUnet(sd_unet.SdUnet):
         for i in range(len(ov_model.control_images)):
             ov_model.control_images[i] = OVUnet.prepare_image(ov_model.control_images[i], 512, 512, 1, 1, torch.device('cpu'), torch.float32, True, False)
         sd_unet.current_unet = ov_model
-        print('[OV] end of activate')
+        logging.info('  end of activate')
         
     def deactivate(self):
-        print('[OV]deactivate called')
-        #del self.unet
+        logging.info(' deactivate called')
+        del globals_state['openvino']
+        del globals_state['diffusers']
+        gc.collect()
+        globals_state['openvino'] = None
+        globals_state['diffusers'] = None
+        
+        logging.info(' deactivate finished')
 
 
 opt = dict() # openvino pytorch compile options
@@ -489,15 +500,15 @@ class Script(scripts.Script):
         enable_caching_status = gr.Textbox(label="cache", interactive=False, visible=False) 
         
         def enable_ov_extension_handler(status):
-            print(f'change enable to {status}')
+            logging.info(f'  change enable to {status}')
             model_state.enable_ov_extension = status
 
         def openvino_device_handler(status):
-            print(f'change enable to {status}')
+            logging.info(f'change enable to {status}')
             model_state.device = status
 
         def enable_caching_handler(status):
-            print(f'change enable to {status}')
+            logging.info(f'change enable to {status}')
             model_state.enable_caching = status
 
             
@@ -511,16 +522,16 @@ class Script(scripts.Script):
             openvino_device.change(fn=openvino_device_handler, inputs=openvino_device, outputs=openvino_device_status)
             enable_caching.change(fn=enable_caching_handler, inputs=enable_caching, outputs=enable_caching_status)
         
-        
+        '''
         def enable_change(choice):
                 if choice:
                     processing._process_images = processing.process_images
-                    print("enable vo extension")
+                    logging.info("enable vo extension")
                     processing.process_images = self.run
                 else:
                     if hasattr(processing, '_process_images'):
                         processing.process_images = processing._process_images
-                    print('disable ov extension')
+                    logging.info('disable ov extension')
         
         
         def device_change(choice):
@@ -545,6 +556,7 @@ class Script(scripts.Script):
             else:
                 model_state.refiner_ckpt = choice
         #refiner_ckpt.change(refiner_ckpt_change, refiner_ckpt)
+        '''
         return [enable_ov_extension, openvino_device, enable_caching]
     
     
@@ -552,7 +564,7 @@ class Script(scripts.Script):
         
         # https://huggingface.co/docs/diffusers/main/en/using-diffusers/merge_loras
         if not model_state.enable_ov_extension: 
-            print('[OV] after_extra_networks_activate: not enabled, return ')
+            logging.info('  after_extra_networks_activate: not enabled, return ')
             return
         
         names = []
@@ -582,23 +594,23 @@ class Script(scripts.Script):
         OVUnet.activate(p) # reload the engine
         
     def process(self, p, *args):
-        print("[OV]ov process called")
+        logging.info(" ov process called")
         
         
         from modules import scripts
         current_extension_directory = scripts.basedir() + '/extensions/sd-webui-controlnet/scripts'
-        print('current_extension_directory', current_extension_directory)
+        logging.info('current_extension_directory', current_extension_directory)
         sys.path.append(current_extension_directory)
-        print('[OV]p.extra_network_data:\n' ,p.extra_network_data)
-        print('[OV]p.extra_generation_params:\n', p.extra_generation_params)
-        print('[OV] modules.extra_networks.extra_network_registry:', modules.extra_networks.extra_network_registry)
+        logging.info(' p.extra_network_data:\n' ,p.extra_network_data)
+        logging.info(' p.extra_generation_params:\n', p.extra_generation_params)
+        logging.info('  modules.extra_networks.extra_network_registry:', modules.extra_networks.extra_network_registry)
 
         enable_ov = model_state.enable_ov_extension
         openvino_device = model_state.device # device
         enable_caching = model_state.enable_caching
 
         if not enable_ov:
-            print('ov disabled, do nothing')
+            logging.info('ov disabled, do nothing')
             self.restore_unet(p)
             return
         
@@ -616,9 +628,9 @@ class Script(scripts.Script):
             if "cache_dir" in opt_new: del opt_new["cache_dir"]
             if os.path.exists(dir_path) and os.path.isdir(dir_path):
                 shutil.rmtree(dir_path)
-                print(f"Directory '{dir_path}' and its contents have been removed.")
+                logging.info(f"Directory '{dir_path}' and its contents have been removed.")
             else:
-                print(f"Directory '{dir_path}' does not exist.")
+                logging.info(f"Directory '{dir_path}' does not exist.")
         
         if opt_new != opt:
             model_state.recompile = True
@@ -635,7 +647,7 @@ class Script(scripts.Script):
 
         if model_state.model_name != p.sd_model_name or opt_new != opt or current_control_models != model_state.control_models:
             model_state.recompile = True
-            print('[OV] set recompile to true')
+            logging.info('  set recompile to true')
             model_state.control_models = current_control_models
             
         
@@ -643,33 +655,34 @@ class Script(scripts.Script):
         model_state.model_name = p.sd_model_name
         opt = opt_new
         if model_state.recompile:
-            print('[OV]recompile')
+            logging.info(' recompile')
             #try:
             self.build_unet(p) # rebuild unet from safe tensors
             #except Exception as e:
-            #    print(f'[OV]Error build_unet: {e}, fallback to default unet')
+            #    logging.info(f' Error build_unet: {e}, fallback to default unet')
             #    return
         
         self.apply_unet(p) # hook the forward function of unet, do this for every process call
+    
         
 
         # to do: add feature to fallback default vae after replacement
         if loaded_vae_file is not None:
-            print('[OV] hook the vae')
+            logging.info('  hook the vae')
             if OV_df_vae is None: 
                 OV_df_vae = AutoencoderKL.from_single_file(loaded_vae_file, local_files_only=True)
             def vaehook(img):
-                print('[OV] hooked vae called')
+                logging.info('  hooked vae called')
                 OV_df_vae.decode = torch.compile(OV_df_vae.decode, backend="openvino", options = opt)
                 return OV_df_vae.decode(img/OV_df_vae.config.scaling_factor, return_dict = False)[0]
             shared.sd_model.decode_first_stage = vaehook
         else:
-            print('no custom vae loaded')
+            logging.info('no custom vae loaded')
         
         
-        print('[OV] ov enabled')
+        logging.info('  ov enabled')
         
-        print("p.sd_model_name:",p.sd_model_name)
+        logging.info("p.sd_model_name:",p.sd_model_name)
 
         
     def apply_unet(self, p):
@@ -678,10 +691,18 @@ class Script(scripts.Script):
         sd_ldm = p.sd_model
         model = sd_ldm.model.diffusion_model
         model._original_forward = model.forward
-        print('force forward ')
+        logging.info('force forward ')
         model.forward = pipes['openvino'].forward
-        print('finish force forward ')
+        logging.info('finish force forward ')
     
+    def apply_vae(self, p):
+        def vaehook(img):
+            logging.info('  hooked vae called')
+            return ov_model.vae.decode(img/OV_df_vae.config.scaling_factor, return_dict = False)[0]
+        shared.sd_model._original_decode_first_stage = shared.sd_model.decode_first_stage
+        shared.sd_model.decode_first_stage = vaehook
+        
+         
     def restore_unet(self,p):
         if sd_unet.current_unet is not None:
             sd_unet.current_unet.deactivate()
@@ -693,15 +714,20 @@ class Script(scripts.Script):
             model.forward = model._original_forward 
             del model._original_forward
         
-        
-        print('restore unet')
+        logging.info('restore unet')
+    
+    def restore_vae(self, p):
+        if hasattr(shared.sd_model, "_original_decode_first_stage"):
+            shared.sd_model.decode_first_stage = shared.sd_model._original_decode_first_stage
+            del shared.sd_model._original_decode_first_stage
+        logging.info('restore vae')
 
 
 def refiner_cb_fn(args):
     
     if model_state.enable_ov_extension and pipes['openvino'] and pipes['openvino'].process.extra_generation_params.get('Refiner', False):
         refiner_filename = model_state.refiner_ckpt.split(' ')[0]
-        print('[OV] reload refiner checkpoint:',refiner_filename)
+        logging.info('  reload refiner checkpoint:',refiner_filename)
         OVUnet.activate(pipes['openvino'].process, refiner_filename)
         
 script_callbacks.on_model_loaded(refiner_cb_fn)

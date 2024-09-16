@@ -16,13 +16,6 @@ class ModelState:
         self.vae_ckpt = "None"
         self.refiner_ckpt = "None"
 
-        
-
 model_state = ModelState()
 
 pipes = {'diffusers': None, 'openvino': None}
-df_pipe = None # pipeline from single file of diffusers
-
-OV_df_pipe = None # OpenVINO diffusers pipeline
-
-OV_df_vae = None # vae diffusers model

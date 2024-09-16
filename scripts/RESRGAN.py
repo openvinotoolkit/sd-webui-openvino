@@ -1,11 +1,7 @@
 
 from modules.modelloader import load_file_from_url
 from modules import shared, script_callbacks, errors
-#import sd_hijack_autoencoder  # noqa: F401
-#import sd_hijack_ddpm_v1  # noqa: F401
-
 import os
-
 from modules import modelloader, errors
 from modules.shared import cmd_opts, opts
 from modules.upscaler import Upscaler, UpscalerData
@@ -17,8 +13,6 @@ class UpscalerRealESRGAN(Upscaler):
         self.name = "RealESRGAN[OV]"
         self.user_path = path
         super().__init__()
-        #scaler_data = UpscalerData("LDSR", None, self)
-        #self.scalers = [scaler_data]
         self.enable = True
         self.scalers = []
         scalers = get_realesrgan_models(self)
