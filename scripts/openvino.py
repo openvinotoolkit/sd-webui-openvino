@@ -666,7 +666,7 @@ class Script(scripts.Script):
     
         
 
-        # to do: add feature to fallback default vae after replacement
+        # TODO: add feature to fallback default vae after replacement
         if loaded_vae_file is not None:
             logging.info('  hook the vae')
             if OV_df_vae is None: 
