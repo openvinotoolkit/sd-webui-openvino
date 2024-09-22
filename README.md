@@ -1,6 +1,7 @@
 # OpenVINO Extension for Stable Diffusion
 
 This extension accelerate the image generation speed by integrating OpenVINO backend to diffusers.
+
 ![Preview](imgs/preview.png)
 ## Installation
 - Open "Extensions" tab.
