@@ -8,6 +8,7 @@ This extension accelerate the image generation speed by integrating OpenVINO bac
 - Open "Extensions" tab.
 - Open "Install from URL" tab in the tab.
 Enter https://github.com/openvinotoolkit/sd-webui-openvino.git to "URL for extension's git repository".
+
 ![Install](imgs/install1.png)
 - Press "Install" button.
 - Go to "Installed" tab, then click "Apply and restart UI". 
