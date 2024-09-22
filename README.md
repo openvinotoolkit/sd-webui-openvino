@@ -14,6 +14,7 @@ Enter https://github.com/openvinotoolkit/sd-webui-openvino.git to "URL for exten
 - Go to "Installed" tab, then click "Apply and restart UI". 
 
 ![Install](imgs/install2.png)
+
 ## Features
 - Support txt2img pipeline ,img2img and inpaint pipeline. 
 - Support most of the upscalers, fallback to torch for unsupported upscalers.
