@@ -22,7 +22,6 @@ import modules.paths as paths
 from modules import scripts, script_callbacks
 from modules import processing, sd_unet
 from modules import images, devices, extra_networks, masking, shared, sd_models_config, prompt_parser
-from modules.sd_vae import vae_dict, base_vae, loaded_vae_file
 from modules.processing import (
     StableDiffusionProcessing, Processed, apply_overlay, apply_color_correction,
     get_fixed_seed, create_infotext, setup_color_correction
@@ -324,15 +323,16 @@ class OVUnet(sd_unet.SdUnet):
             pipes['diffusers'] = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         ov_model.unet = pipes['diffusers'].unet.to("cpu") # OV device should only be in the options for torch.compile
         ov_model.unet = torch.compile(ov_model.unet, backend="openvino", options = opt)
-        ov_model.vae = pipes['diffusers'].vae.to("cpu")
 
+        from modules.sd_vae import loaded_vae_file
         if loaded_vae_file is not None:
-            logging.info('hook the vae')
+            logging.info('custom vae detected')
             ov_model.vae = AutoencoderKL.from_single_file(loaded_vae_file, local_files_only=True)
         else:
+            logging.info('no custom vae detected')
             ov_model.vae = pipes['diffusers'].vae.to("cpu")
         
-        ov_model.vae.decode = torch.compile(ov_model.vae.decode, backend="openvino", options = opt)
+        ov_model.vae = torch.compile(ov_model.vae, backend="openvino", options = opt)
         
         
         ov_model.has_controlnet = False
@@ -388,17 +388,17 @@ class OVUnet(sd_unet.SdUnet):
                 preprocessor = Preprocessor.get_preprocessor(unit.module)
                 logging.info(f"preprocessor: {preprocessor}")
                 
-                
+                # TODO: Add support for IPAdapter 
                 if unit.ipadapter_input is not None:
                     logging.info(f"ipadapter_input is not None: {unit.ipadapter_input}")
                     # Use ipadapter_input from API call.
-                    #assert control_model_type == ControlModelType.IPAdapter
+                    assert control_model_type == ControlModelType.IPAdapter
                     controls = unit.ipadapter_input
                     hr_controls = unit.ipadapter_input
                 else:
-                    logging.info('unit.ipdadapter_input is None, call default get_control')
+                    logging.info('process controlnet input')
                     from controlnet import get_control
-                    controls, hr_controls, additional_maps = get_control(  # get the controlnet input? Yes, preprocess
+                    controls, hr_controls, additional_maps = get_control(
                         p, unit, 0, ControlModelType.ControlNet, preprocessor)
                     control_images.append(controls[0])
 
@@ -644,7 +644,7 @@ class Script(scripts.Script):
     def apply_vae(self, p):
         def vaehook(img):
             logging.info('hooked vae called')
-            return ov_model.vae.decode(img/OV_df_vae.config.scaling_factor, return_dict = False)[0]
+            return pipes['openvino'].vae.decode(img/pipes['openvino'].vae.config.scaling_factor, return_dict = False)[0]
         shared.sd_model._original_decode_first_stage = shared.sd_model.decode_first_stage
         shared.sd_model.decode_first_stage = vaehook
         
