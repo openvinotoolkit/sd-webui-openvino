@@ -16,7 +16,7 @@ Enter https://github.com/openvinotoolkit/sd-webui-openvino.git to "URL for exten
 ![Install](imgs/install2.png)
 
 ## Features
-- Support txt2img pipeline ,img2img and inpaint pipeline. 
+- Support txt2img pipeline, img2img, and inpaint pipeline. 
 - Support most of the upscalers, fallback to torch for unsupported upscalers.
   - OpenVINO supported model get accelerated automatically(latent, R-esrGAN, etc)
   - OpenVINO yet to support model fallback to native Pytorch
