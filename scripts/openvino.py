@@ -50,8 +50,7 @@ ov_model = pipes['openvino']
 controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 sys.path.append(controlnet_extension_directory)
 from scripts.utils import load_state_dict, get_state_dict
-#from scripts.controlnet import Script as ControlNetScript
-from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS#, get_control
+from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS
 
 #ignore future warnings
 import warnings
@@ -88,7 +87,6 @@ class OVUnet(sd_unet.SdUnet):
         super().__init__()
         self.model_name = p.sd_model_name
         self.process = p
-        #self.configs = configs
         self.loaded_config = None
         self.lora_fused = defaultdict(bool)
         self.unet = None
@@ -123,7 +121,7 @@ class OVUnet(sd_unet.SdUnet):
                 negative_prompt_embeds,
                 pooled_prompt_embeds,
                 negative_pooled_prompt_embeds,
-            ) = df_pipe.encode_prompt(
+            ) = pipes['diffusers'].encode_prompt(
                 prompt=prompt,
                 prompt_2=None,
                 device=device,
@@ -140,7 +138,7 @@ class OVUnet(sd_unet.SdUnet):
             )
 
             # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-            #extra_step_kwargs = df_pipe.prepare_extra_step_kwargs(generator, eta)
+            # extra_step_kwargs = pipes['diffusers'].prepare_extra_step_kwargs(generator, eta)
 
             # 7. Prepare added time ids & embeddings
             add_text_embeds = pooled_prompt_embeds
@@ -169,10 +167,13 @@ class OVUnet(sd_unet.SdUnet):
             else:
                 negative_add_time_ids = add_time_ids
 
-            if True: #df_pipe.do_classifier_free_guidance:
-                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-                add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-                add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+            
+            # do_classifier_free_guidance sd-xl
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+            add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+            
+            # TODO: add support for non-classifier free guidance sd-xl
 
             prompt_embeds = prompt_embeds.to(device)
             add_text_embeds = add_text_embeds.to(device)
@@ -194,7 +195,7 @@ class OVUnet(sd_unet.SdUnet):
                 logging.info(f"control model: {pipes['openvino'].control_models[i]}")
                 control_model = pipes['openvino'].control_models[i]
                 image = pipes['openvino'].control_images[i]
-                control_model = torch.compile(pipes['openvino'].controlnet, backend = 'openvino', options = opt)  # ControlNetModel.from_single_file('./extensions/sd-webui-controlnet/models/control_v11p_sd15_canny_fp16.safetensors', local_files_only=True)
+                control_model = torch.compile(pipes['openvino'].controlnet, backend = 'openvino', options = opt)
                 down_samples, mid_sample = control_model(
                     x,
                     timesteps,
@@ -230,19 +231,6 @@ class OVUnet(sd_unet.SdUnet):
 
         return noise_pred
     
-    def apply_loras(self, refit_dict: dict):
-        if not self.refitted_keys.issubset(set(refit_dict.keys())):
-            # TODO: Need to ensure that weights that have been modified before and are not present anymore are reset.
-            self.refitted_keys = set()
-            self.switch_engine()
-
-        self.engine.refit_from_dict(refit_dict, is_fp16=True)
-        self.refitted_keys = set(refit_dict.keys())
-
-    def switch_engine(self):
-        self.loaded_config = self.configs[self.profile_idx]
-        self.engine.reset(os.path.join(OV_MODEL_DIR, self.loaded_config["filepath"]))
-        self.activate(p)
     
     @staticmethod 
     def prepare_image(
