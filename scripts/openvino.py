@@ -192,10 +192,8 @@ class OVUnet(sd_unet.SdUnet):
             cond_mark, self.current_uc_indices, self.current_c_indices, context = unmark_prompt_context(context)
 
             for i in range(len(pipes['openvino'].control_models)):
-                logging.info(f"control model: {pipes['openvino'].control_models[i]}")
                 control_model = pipes['openvino'].control_models[i]
                 image = pipes['openvino'].control_images[i]
-                control_model = torch.compile(pipes['openvino'].controlnet, backend = 'openvino', options = opt)
                 down_samples, mid_sample = control_model(
                     x,
                     timesteps,
@@ -292,9 +290,6 @@ class OVUnet(sd_unet.SdUnet):
         pipes['diffusers'] = None
         
         #### controlnet ####
-        logging.info(p.extra_generation_params)
-
-        
         logging.info('loading OV unet model')
         checkpoint_name = checkpoint or shared.opts.sd_model_checkpoint.split(" ")[0]
         checkpoint_path = os.path.join(scripts.basedir(), 'models', 'Stable-diffusion', checkpoint_name)
@@ -334,7 +329,6 @@ class OVUnet(sd_unet.SdUnet):
                 if param.enabled == False: continue
                 
                 model_name = param.model.split(' ')[0] 
-                control_models.append(model_name)
 
                 cn_model_dir_path = os.path.join(scripts.basedir(),'extensions','sd-webui-controlnet','models')
                 cn_model_path = os.path.join(cn_model_dir_path, model_name)
@@ -364,7 +358,8 @@ class OVUnet(sd_unet.SdUnet):
                 if control_model_type == ControlModelType.ControlNet:
                     
                     controlnet = ControlNetModel.from_single_file(cn_model_path, local_files_only=False)
-                    ov_model.controlnet = controlnet
+                    controlnet = torch.compile(controlnet, backend="openvino", options = opt)
+                    control_models.append(controlnet)
                 else:
                     assert False, f"Control model type {control_model_type} is not supported."
                 
