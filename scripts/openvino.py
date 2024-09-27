@@ -105,6 +105,8 @@ class OVUnet(sd_unet.SdUnet):
             negative_prompt = self.process.negative_prompt
             device = df_pipe._execution_device
             lora_scale = None #(
+            cfg_scale = self.process.cfg_scale
+            do_classifier_free_guidance = cfg_scale > 1 and self.unet.config.time_cond_proj_dim is None
             
             # 2. Define call parameters
             if prompt is not None and isinstance(prompt, str):
@@ -116,6 +118,7 @@ class OVUnet(sd_unet.SdUnet):
             
             num_images_per_prompt = kwargs.get("num_images_per_prompt", 1)
 
+            # 3. Encode input prompt
             (
                 prompt_embeds,
                 negative_prompt_embeds,
@@ -126,7 +129,7 @@ class OVUnet(sd_unet.SdUnet):
                 prompt_2=None,
                 device=device,
                 num_images_per_prompt=num_images_per_prompt,
-                do_classifier_free_guidance=True, #df_pipe.do_classifier_free_guidance,
+                do_classifier_free_guidance=do_classifier_free_guidance,
                 negative_prompt=negative_prompt,
                 negative_prompt_2=None,
                 prompt_embeds=None, #prompt_embeds,
@@ -134,6 +137,7 @@ class OVUnet(sd_unet.SdUnet):
                 pooled_prompt_embeds=None, #pooled_prompt_embeds,
                 negative_pooled_prompt_embeds=None, #negative_pooled_prompt_embeds,
                 lora_scale=lora_scale,
+                # TODO: support for clip_skip not None
                 clip_skip=None,#df_pipe.clip_skip,
             )
 
@@ -168,12 +172,12 @@ class OVUnet(sd_unet.SdUnet):
                 negative_add_time_ids = add_time_ids
 
             
-            # do_classifier_free_guidance sd-xl
-            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-            add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
-            add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
+            # if do_classifier_free_guidance is true, we need to double the prompt embeds
+            if do_classifier_free_guidance: 
+                prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+                add_text_embeds = torch.cat([negative_pooled_prompt_embeds, add_text_embeds], dim=0)
+                add_time_ids = torch.cat([negative_add_time_ids, add_time_ids], dim=0)
             
-            # TODO: add support for non-classifier free guidance sd-xl
 
             prompt_embeds = prompt_embeds.to(device)
             add_text_embeds = add_text_embeds.to(device)
@@ -284,7 +288,7 @@ class OVUnet(sd_unet.SdUnet):
             gc.collect()
             pipes['openvino'] = None
             pipes['diffusers'] = None
-            logging.info('del old OV_df_pipe and df_pipe')
+            logging.info('del old pipes')
 
         ov_model = OVUnet(p)
         pipes['diffusers'] = None
@@ -298,12 +302,16 @@ class OVUnet(sd_unet.SdUnet):
         state_dict = get_checkpoint_state_dict(checkpoint_info, timer)
         checkpoint_config = sd_models_config.find_checkpoint_config(state_dict, checkpoint_info)
         logging.info("created model from config : " + checkpoint_config)
-        if 'xl' not in checkpoint_config:
-            logging.info('load sd pipeline')
-            pipes['diffusers'] = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
-        else:
+        
+        is_sdxl = hasattr(model_data.sd_model, 'conditioner')
+        is_sd2 = not is_sdxl and hasattr(model_data.sd_model.cond_stage_model, 'model')
+        if is_sdxl:
             logging.info('load sd-xl pipeline')
             pipes['diffusers'] = StableDiffusionXLPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+        else:
+            # TODO: check support for sd2 
+            logging.info('load sd pipeline')
+            pipes['diffusers'] = StableDiffusionPipeline.from_single_file(checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
         ov_model.unet = pipes['diffusers'].unet.to("cpu") # OV device should only be in the options for torch.compile
         ov_model.unet = torch.compile(ov_model.unet, backend="openvino", options = opt)
 
@@ -316,7 +324,6 @@ class OVUnet(sd_unet.SdUnet):
             ov_model.vae = pipes['diffusers'].vae.to("cpu")
         
         ov_model.vae = torch.compile(ov_model.vae, backend="openvino", options = opt)
-        
         
         ov_model.has_controlnet = False
         cn_model="None"
