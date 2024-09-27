@@ -16,6 +16,7 @@ class ModelState:
         self.vae_ckpt = "None"
         self.refiner_ckpt = "None"
 
+
 model_state = ModelState()
 
 pipes = {'diffusers': None, 'openvino': None}

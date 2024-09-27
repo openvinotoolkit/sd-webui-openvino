@@ -21,7 +21,8 @@ class UpscalerRealESRGAN(Upscaler):
         for scaler in scalers:
             if scaler.local_data_path.startswith("http"):
                 filename = modelloader.friendly_name(scaler.local_data_path)
-                local_model_candidates = [local_model for local_model in local_model_paths if local_model.endswith(f"{filename}.pth")]
+                local_model_candidates = [
+                    local_model for local_model in local_model_paths if local_model.endswith(f"{filename}.pth")]
                 if local_model_candidates:
                     scaler.local_data_path = local_model_candidates[0]
 
@@ -35,13 +36,15 @@ class UpscalerRealESRGAN(Upscaler):
         try:
             info = self.load_model(path)
         except Exception:
-            errors.report(f"Unable to load RealESRGAN model {path}", exc_info=True)
+            errors.report(
+                f"Unable to load RealESRGAN model {path}", exc_info=True)
             return img
 
         model_descriptor = modelloader.load_spandrel_model(
             info.local_data_path,
             device=self.device,
-            prefer_half=(not cmd_opts.no_half and not cmd_opts.upcast_sampling),
+            prefer_half=(
+                not cmd_opts.no_half and not cmd_opts.upcast_sampling),
             expected_architecture="ESRGAN",  # "RealESRGAN" isn't a specific thing for Spandrel
         )
         import torch
@@ -65,7 +68,8 @@ class UpscalerRealESRGAN(Upscaler):
                         model_dir=self.model_download_path,
                     )
                 if not os.path.exists(scaler.local_data_path):
-                    raise FileNotFoundError(f"RealESRGAN data missing: {scaler.local_data_path}")
+                    raise FileNotFoundError(
+                        f"RealESRGAN data missing: {scaler.local_data_path}")
                 return scaler
         raise ValueError(f"Unable to find model info: {path}")
 
@@ -109,4 +113,3 @@ def get_realesrgan_models(scaler: UpscalerRealESRGAN):
             upscaler=scaler,
         ),
     ]
-
