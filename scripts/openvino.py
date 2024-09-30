@@ -52,7 +52,6 @@ from scripts.global_state_openvino import model_state, pipes
 df_pipe = pipes['diffusers']
 ov_model = pipes['openvino']
 
-# from scripts.utils_ov import ControlModelType
 controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
 sys.path.append(controlnet_extension_directory)
 
@@ -62,15 +61,6 @@ logging = logging.getLogger("OpenVINO")
 logging.setLevel("INFO")
 
 
-def cond_stage_key(self):
-    return None
-
-# sdxl invisible-watermark pixel artifact workaround
-
-
-class NoWatermark:
-    def apply_watermark(self, img):
-        return img
 
 
 def on_change(mode):
@@ -146,8 +136,6 @@ class OVUnet(sd_unet.SdUnet):
                 clip_skip=None,  # df_pipe.clip_skip,
             )
 
-            # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
-            # extra_step_kwargs = pipes['diffusers'].prepare_extra_step_kwargs(generator, eta)
 
             # 7. Prepare added time ids & embeddings
             add_text_embeds = pooled_prompt_embeds
