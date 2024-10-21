@@ -1,3 +1,6 @@
+# Copyright (C) 2024-2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
 class ModelState:
     def __init__(self):
         self.enable_ov_extension = False

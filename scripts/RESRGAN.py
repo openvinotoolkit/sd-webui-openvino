@@ -1,3 +1,5 @@
+# Copyright (C) 2024-2024 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
 
 from modules.modelloader import load_file_from_url
 from modules import shared, script_callbacks, errors
