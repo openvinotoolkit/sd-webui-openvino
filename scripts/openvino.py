@@ -2,8 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import warnings
-from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS
-from scripts.utils import load_state_dict, get_state_dict
+from scripts.utils_ov import is_controlnet_extension_installed
+if is_controlnet_extension_installed:
+    from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS
+    from scripts.utils import load_state_dict, get_state_dict
+    controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
+    sys.path.append(controlnet_extension_directory)
 from contextlib import closing
 import cv2
 import os
@@ -53,8 +57,7 @@ from scripts.global_state_openvino import model_state, pipes
 df_pipe = pipes['diffusers']
 ov_model = pipes['openvino']
 
-controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
-sys.path.append(controlnet_extension_directory)
+
 
 # ignore future warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
