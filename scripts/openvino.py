@@ -6,6 +6,8 @@ from scripts.utils_ov import is_controlnet_extension_installed
 if is_controlnet_extension_installed:
     from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS
     from scripts.utils import load_state_dict, get_state_dict
+    from modules import scripts
+    import sys
     controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
     sys.path.append(controlnet_extension_directory)
 from contextlib import closing
