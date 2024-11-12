@@ -644,6 +644,8 @@ class Script(scripts.Script):
             else:
                 logging.info(f"Directory '{dir_path}' does not exist.")
 
+        model_state.recompile = False
+
         if opt_new != opt:
             model_state.recompile = True
 
