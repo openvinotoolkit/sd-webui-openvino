@@ -6,6 +6,8 @@ from scripts.utils_ov import is_controlnet_extension_installed
 if is_controlnet_extension_installed:
     from scripts.utils_ov import mark_prompt_context, unmark_prompt_context, POSITIVE_MARK_TOKEN, NEGATIVE_MARK_TOKEN, MARK_EPS
     from scripts.utils import load_state_dict, get_state_dict
+    from modules import scripts
+    import sys
     controlnet_extension_directory = scripts.basedir() + '/../sd-webui-controlnet'
     sys.path.append(controlnet_extension_directory)
 from contextlib import closing
@@ -65,6 +67,14 @@ logging = logging.getLogger("OpenVINO")
 logging.setLevel("INFO")
 
 
+##hack eval_frame.py for windows support, could be removed after official windows support from pytorch
+def check_if_dynamo_supported():
+    import sys
+    # Skip checking for Windows support for the OpenVINO backend
+    if sys.version_info >= (3, 12):
+        raise RuntimeError("Python 3.12+ not yet supported for torch.compile")
+
+torch._dynamo.eval_frame.check_if_dynamo_supported = check_if_dynamo_supported
 
 
 def on_change(mode):
@@ -344,74 +354,78 @@ class OVUnet(sd_unet.SdUnet):
         cn_model = "None"
         control_models = []
         control_images = []
-        from internal_controlnet.external_code import ControlNetUnit, Preprocessor
-        from scripts.enums import ControlModelType
-        for param in p.script_args:
-            if isinstance(param, ControlNetUnit):
-                if param.enabled == False:
-                    continue
 
-                model_name = param.model.split(' ')[0]
+        import importlib.util
+        int_cnet = importlib.util.find_spec("internal_controlnet")
+        if int_cnet is not None:
+            from internal_controlnet.external_code import ControlNetUnit, Preprocessor
+            from scripts.enums import ControlModelType
+            for param in p.script_args:
+                if isinstance(param, ControlNetUnit):
+                    if param.enabled == False:
+                        continue
 
-                cn_model_dir_path = os.path.join(
-                    scripts.basedir(), 'extensions', 'sd-webui-controlnet', 'models')
-                cn_model_path = os.path.join(cn_model_dir_path, model_name)
-                if os.path.isfile(cn_model_path + '.pt'):
-                    cn_model_path = cn_model_path + '.pt'
-                elif os.path.isfile(cn_model_path + '.safetensors'):
-                    cn_model_path = cn_model_path + '.safetensors'
-                elif os.path.isfile(cn_model_path + '.pth'):
-                    cn_model_path = cn_model_path + '.pth'
+                    model_name = param.model.split(' ')[0]
 
-                # parse controlnet type
-                control_model_type = None
-                logging.info('load state_dict')
-                state_dict = load_state_dict(cn_model_path)
-                if "lora_controlnet" in state_dict:
-                    control_model_type = ControlModelType.ControlLoRA
-                elif "down_blocks.0.motion_modules.0.temporal_transformer.norm.weight" in state_dict:
-                    control_model_type = ControlModelType.SparseCtrl
-                elif "control_add_embedding.linear_1.bias" in state_dict:  # Controlnet Union
+                    cn_model_dir_path = os.path.join(
+                        scripts.basedir(), 'extensions', 'sd-webui-controlnet', 'models')
+                    cn_model_path = os.path.join(cn_model_dir_path, model_name)
+                    if os.path.isfile(cn_model_path + '.pt'):
+                        cn_model_path = cn_model_path + '.pt'
+                    elif os.path.isfile(cn_model_path + '.safetensors'):
+                        cn_model_path = cn_model_path + '.safetensors'
+                    elif os.path.isfile(cn_model_path + '.pth'):
+                        cn_model_path = cn_model_path + '.pth'
 
-                    control_model_type = ControlModelType.ControlNetUnion
-                elif "instant_id" in cn_model_path.lower():
-                    control_model_type = ControlModelType.InstantID
-                else:
-                    control_model_type = ControlModelType.ControlNet
+                    # parse controlnet type
+                    control_model_type = None
+                    logging.info('load state_dict')
+                    state_dict = load_state_dict(cn_model_path)
+                    if "lora_controlnet" in state_dict:
+                        control_model_type = ControlModelType.ControlLoRA
+                    elif "down_blocks.0.motion_modules.0.temporal_transformer.norm.weight" in state_dict:
+                        control_model_type = ControlModelType.SparseCtrl
+                    elif "control_add_embedding.linear_1.bias" in state_dict:  # Controlnet Union
 
-                if control_model_type == ControlModelType.ControlNet:
+                        control_model_type = ControlModelType.ControlNetUnion
+                    elif "instant_id" in cn_model_path.lower():
+                        control_model_type = ControlModelType.InstantID
+                    else:
+                        control_model_type = ControlModelType.ControlNet
 
-                    controlnet = ControlNetModel.from_single_file(
-                        cn_model_path, local_files_only=False)
-                    controlnet = torch.compile(
-                        controlnet, backend="openvino", options=opt)
-                    control_models.append(controlnet)
-                else:
-                    assert False, f"Control model type {control_model_type} is not supported."
+                    if control_model_type == ControlModelType.ControlNet:
 
-                logging.info(
-                    ' this is supported by OV, disable enabled units to avoid controlnet extension hook')
-                # disable param.enabled, controlnet extension cannot find enabled units
-                param.enabled = False
-                # preprocess the image before, adapted from controlnet extension
-                unit = param
-                preprocessor = Preprocessor.get_preprocessor(unit.module)
-                logging.info(f"preprocessor: {preprocessor}")
+                        controlnet = ControlNetModel.from_single_file(
+                            cn_model_path, local_files_only=False)
+                        controlnet = torch.compile(
+                            controlnet, backend="openvino", options=opt)
+                        control_models.append(controlnet)
+                    else:
+                        assert False, f"Control model type {control_model_type} is not supported."
 
-                # TODO: Add support for IPAdapter
-                if unit.ipadapter_input is not None:
                     logging.info(
-                        f"ipadapter_input is not None: {unit.ipadapter_input}")
-                    # Use ipadapter_input from API call.
-                    assert control_model_type == ControlModelType.IPAdapter
-                    controls = unit.ipadapter_input
-                    hr_controls = unit.ipadapter_input
-                else:
-                    logging.info('process controlnet input')
-                    from controlnet import get_control
-                    controls, hr_controls, additional_maps = get_control(
-                        p, unit, 0, ControlModelType.ControlNet, preprocessor)
-                    control_images.append(controls[0])
+                        ' this is supported by OV, disable enabled units to avoid controlnet extension hook')
+                    # disable param.enabled, controlnet extension cannot find enabled units
+                    param.enabled = False
+                    # preprocess the image before, adapted from controlnet extension
+                    unit = param
+                    preprocessor = Preprocessor.get_preprocessor(unit.module)
+                    logging.info(f"preprocessor: {preprocessor}")
+
+                    # TODO: Add support for IPAdapter
+                    if unit.ipadapter_input is not None:
+                        logging.info(
+                            f"ipadapter_input is not None: {unit.ipadapter_input}")
+                        # Use ipadapter_input from API call.
+                        assert control_model_type == ControlModelType.IPAdapter
+                        controls = unit.ipadapter_input
+                        hr_controls = unit.ipadapter_input
+                    else:
+                        logging.info('process controlnet input')
+                        from controlnet import get_control
+                        controls, hr_controls, additional_maps = get_control(
+                            p, unit, 0, ControlModelType.ControlNet, preprocessor)
+                        control_images.append(controls[0])
 
         if not control_images:
             logging.info('NO CNET detected, unet build finished')
@@ -632,17 +646,23 @@ class Script(scripts.Script):
             else:
                 logging.info(f"Directory '{dir_path}' does not exist.")
 
+        model_state.recompile = False
+
         if opt_new != opt:
             model_state.recompile = True
 
         current_control_models = []
-        from internal_controlnet import external_code  # noqa: F403
-        from internal_controlnet.external_code import ControlNetUnit, Preprocessor
-        for param in p.script_args:
-            if isinstance(param, ControlNetUnit):
-                if param.enabled == False:
-                    continue
-                current_control_models.append(param.model.split(' ')[0])
+
+        import importlib.util
+        int_cnet = importlib.util.find_spec("internal_controlnet")
+        if int_cnet is not None:
+            from internal_controlnet import external_code  # noqa: F403
+            from internal_controlnet.external_code import ControlNetUnit, Preprocessor
+            for param in p.script_args:
+                if isinstance(param, ControlNetUnit):
+                    if param.enabled == False:
+                        continue
+                    current_control_models.append(param.model.split(' ')[0])
 
         if model_state.model_name != p.sd_model_name or opt_new != opt or current_control_models != model_state.control_models:
             model_state.recompile = True
