@@ -112,7 +112,7 @@ class OVUnet(sd_unet.SdUnet):
             logging.info('sd-xl detected')
             prompt = self.process.prompt
             negative_prompt = self.process.negative_prompt
-            device = opt["device"].lower()
+            device = 'cpu'
             lora_scale = None  # 
             cfg_scale = self.process.cfg_scale
             do_classifier_free_guidance = cfg_scale > 1 and self.unet.config.time_cond_proj_dim is None
@@ -327,7 +327,8 @@ class OVUnet(sd_unet.SdUnet):
         if is_sdxl:
             logging.info('load sd-xl pipeline')
             pipes['diffusers'] = StableDiffusionXLPipeline.from_single_file(
-                checkpoint_path, original_config_file=checkpoint_config, use_safetensors=True, variant="fp32", dtype=torch.float32)
+                checkpoint_path, original_config_file=checkpoint_config,
+                use_safetensors=True, variant="fp16", torch_dtype=torch.float16).to(dtype=torch.float32)
         else:
             # TODO: check support for sd2
             logging.info('load sd pipeline')
